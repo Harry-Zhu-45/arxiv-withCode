@@ -52,6 +52,20 @@ KEYWORDS = [
     "open source", "available at"
 ]
 
+# 负向排除短语：命中关键字但语境为不可用时不计入
+EXCLUDE_PHRASES = [
+    "not publicly available",
+    "are not publicly available",
+    "not publicly released",
+    "not available to the public",
+    "not available publicly",
+    "not open source",
+    "not released",
+    "not available"
+]
+
+EXCLUDE_CONTEXT_WINDOW = 200
+
 # 输出目录配置
 OUTPUT_ROOT = "arxiv_papers"
 REPORT_ROOT = "reports"
@@ -262,7 +276,12 @@ def search_pdf(pdf_path, arxiv_id, subject, metadata_lookup=None):
                     pos = m.start()
                     # 简单估算页码
                     page_num = full_text[:pos].count('\n') // 50 + 1
-                    context = full_text[max(0, pos-80):min(len(full_text), pos+len(kw)+80)].replace('\n', ' ')
+                    context_start = max(0, pos - EXCLUDE_CONTEXT_WINDOW)
+                    context_end = min(len(full_text), pos + len(kw) + EXCLUDE_CONTEXT_WINDOW)
+                    context = full_text[context_start:context_end].replace('\n', ' ')
+                    context_lower = context.lower()
+                    if any(p in context_lower for p in EXCLUDE_PHRASES):
+                        continue
                     found.append({'keyword': kw, 'page': page_num, 'context': context})
         
         return {
