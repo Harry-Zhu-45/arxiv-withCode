@@ -145,10 +145,14 @@ def run_download():
     print("Step 1: 下载ArXiv论文")
     print("=" * 50)
     
-    # 尝试导入下载模块
+    # 尝试导入下载模块并调用main函数
     try:
-        from download_arxiv_papers import download_papers
-        download_papers(subject=ARXIV_SUBJECT)
+        from download_arxiv_papers import main as download_main
+        import sys
+        
+        # 模拟命令行参数: 下载今天的论文
+        sys.argv = ['download_arxiv_papers.py', 'today', '-c', ARXIV_SUBJECT]
+        download_main()
     except ImportError:
         print("Error: download_arxiv_papers.py not found")
         sys.exit(1)
