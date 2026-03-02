@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-ArXiv论文下载与代码声明检索工具
+ArXiv多主题论文下载与代码声明检索工具
+
+支持 subjects: quant-ph, physics.optics, cond-mat
 
 Usage:
-    uv run python main.py                    # 下载当天论文并检索
+    uv run python main.py                    # 下载当天所有主题论文并检索
     uv run python main.py --download-only    # 仅下载论文
     uv run python main.py --search-only       # 仅检索已有PDF
 """
@@ -23,7 +25,20 @@ except ImportError:
 
 
 # ============== 配置 ==============
-ARXIV_SUBJECT = "quant-ph"
+# 要监控的 ArXiv 主题列表
+ARXIV_SUBJECTS = [
+    "quant-ph",
+    "physics.optics", 
+    "cond-mat"
+]
+
+# 主题显示名称映射
+SUBJECT_DISPLAY_NAMES = {
+    "quant-ph": "Quantum Physics",
+    "physics.optics": "Optics",
+    "cond-mat": "Condensed Matter"
+}
+
 KEYWORDS = [
     "github", "gitlab", "bitbucket", "repository",
     "zenodo", "figshare", "dataverse", "osf",
@@ -31,17 +46,69 @@ KEYWORDS = [
     "open source", "publicly available", "available at"
 ]
 
+# 输出目录配置
+OUTPUT_ROOT = "arxiv_papers"
+REPORT_ROOT = "reports"
+
 
 # ============== 辅助函数 ==============
-def get_latest_folder():
-    """自动获取最新的论文文件夹"""
-    pattern = f"arxiv_papers/arxiv_{ARXIV_SUBJECT}_*"
-    folders = glob.glob(pattern)
-    if not folders:
-        return None
-    # 按日期排序，取最新的
-    folders.sort(reverse=True)
-    return folders[0]
+def get_today_date():
+    """获取今天的日期字符串"""
+    return datetime.now().strftime('%Y-%m-%d')
+
+
+def get_subject_folder(subject, date):
+    """获取某个主题的文件夹路径"""
+    return f"{OUTPUT_ROOT}/arxiv_{subject}_{date}"
+
+
+def get_all_subject_folders(date):
+    """获取所有主题的文件夹"""
+    folders = []
+    for subject in ARXIV_SUBJECTS:
+        folder = get_subject_folder(subject, date)
+        if os.path.exists(folder):
+            folders.append((subject, folder))
+    return folders
+
+
+def get_latest_date_folders():
+    """自动获取最新日期的所有主题文件夹"""
+    # 查找最新的日期
+    pattern = f"{OUTPUT_ROOT}/arxiv_*_????-??-??"
+    all_folders = glob.glob(pattern)
+    
+    # 兼容Windows路径
+    all_folders = [f.replace('\\', '/') for f in all_folders]
+    
+    if not all_folders:
+        return []
+    
+    # 提取日期并排序
+    date_folders = {}
+    for folder in all_folders:
+        # 提取日期 (arxiv_quant-ph_2026-03-02 -> 2026-03-02)
+        parts = folder.split('_')
+        if len(parts) >= 3:
+            date = parts[-1]
+            if date not in date_folders:
+                date_folders[date] = []
+            date_folders[date].append(folder)
+    
+    if not date_folders:
+        return []
+    
+    # 返回最新日期的文件夹
+    latest_date = max(date_folders.keys())
+    result = []
+    for f in date_folders[latest_date]:
+        # 提取subject (e.g., arxiv_cond-mat_2026-03-02 -> cond-mat)
+        # 格式: .../arxiv_papers/arxiv_{subject}_{date}
+        folder_name = os.path.basename(f)  # 获取最后一部分，如 arxiv_cond-mat_2026-03-02
+        # 去掉arxiv_前缀和日期后缀
+        subject = folder_name.replace('arxiv_', '').rsplit('_', 1)[0]
+        result.append((subject, f))
+    return result
 
 
 def extract_title_abstract(text):
@@ -66,7 +133,7 @@ def extract_title_abstract(text):
     return title, abstract
 
 
-def search_pdf(pdf_path):
+def search_pdf(pdf_path, arxiv_id, subject):
     """检索单个PDF"""
     import re
     
@@ -81,6 +148,9 @@ def search_pdf(pdf_path):
         title, abstract = extract_title_abstract(full_text)
         text_lower = full_text.lower()
         
+        # 构建arXiv摘要链接
+        abs_url = f"https://arxiv.org/abs/{arxiv_id}"
+        
         found = []
         for kw in KEYWORDS:
             if kw.lower() in text_lower:
@@ -92,46 +162,86 @@ def search_pdf(pdf_path):
                     context = full_text[max(0, pos-80):min(len(full_text), pos+len(kw)+80)].replace('\n', ' ')
                     found.append({'keyword': kw, 'page': page_num, 'context': context})
         
-        return {'title': title, 'abstract': abstract, 'findings': found} if found else None
+        return {
+            'title': title, 
+            'abstract': abstract, 
+            'findings': found,
+            'arxiv_id': arxiv_id,
+            'abs_url': abs_url,
+            'subject': subject,
+            'subject_display': SUBJECT_DISPLAY_NAMES.get(subject, subject)
+        } if found else None
         
     except Exception as e:
         print(f"  Error: {e}")
         return None
 
 
-def generate_report(results, output_path):
-    """生成Markdown报告"""
+def generate_unified_report(all_results, output_path):
+    """生成统一的Markdown报告"""
     today = datetime.now().strftime('%Y-%m-%d')
     
-    md = f"""# ArXiv {ARXIV_SUBJECT} {today} 代码/数据公开声明检索报告
+    # 统计
+    total_scanned = sum(r['scanned'] for r in all_results)
+    total_found = sum(len(r['found']) for r in all_results)
+    
+    md = f"""# ArXiv Daily Code/Data Declaration Report
 
-生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Date**: {today}  
+**Subjects**: {', '.join([SUBJECT_DISPLAY_NAMES.get(s, s) for s in ARXIV_SUBJECTS])}  
+**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-扫描PDF: {results['scanned']} 篇 | 发现声明: {len(results['found'])} 篇
+---
+
+## Summary
+
+| Subject | Scanned | Found |
+|---------|---------|-------|
+"""
+    
+    # 按主题统计
+    for r in all_results:
+        subject = r['subject']
+        display = SUBJECT_DISPLAY_NAMES.get(subject, subject)
+        md += f"| {display} | {r['scanned']} | {len(r['found'])} |\n"
+    
+    md += f"""
+**Total**: {total_scanned} papers scanned, {total_found} papers with declarations found
 
 ---
 
 """
     
-    if not results['found']:
-        md += "未发现包含代码/数据公开声明的论文。\n"
+    # 收集所有找到的论文
+    all_found = []
+    for r in all_results:
+        all_found.extend(r['found'])
+    
+    if not all_found:
+        md += "## Results\n\nNo papers with code/data declarations found.\n"
     else:
-        for i, p in enumerate(results['found'], 1):
-            md += f"""## {i}. {p['arxiv_id']}
+        md += f"## Results ({len(all_found)} papers)\n\n"
+        
+        for i, p in enumerate(all_found, 1):
+            md += f"""### {i}. [{p['arxiv_id']}]({p['abs_url']})
 
-**标题**: {p['title']}
+**Subject**: {p['subject_display']}  
+**Title**: {p['title']}
 
-**摘要**: {p['abstract'][:300]}{'...' if len(p['abstract']) > 300 else ''}
+**Abstract**: {p['abstract'][:300]}{'...' if len(p['abstract']) > 300 else ''}
 
-### 发现的声明
+**Declarations Found**:
 
 """
             for f in p['findings']:
-                md += f"""- `{f['keyword']}` (第{f['page']}页)
+                md += f"""- `{f['keyword']}` (Page {f['page']})
   > ...{f['context']}...
 
 """
 
+    # 确保输出目录存在
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(md)
     
@@ -140,69 +250,104 @@ def generate_report(results, output_path):
 
 # ============== 主流程 ==============
 def run_download():
-    """下载论文"""
-    print("=" * 50)
+    """下载所有主题的论文"""
+    print("=" * 60)
     print("Step 1: 下载ArXiv论文")
-    print("=" * 50)
+    print("=" * 60)
     
-    # 尝试导入下载模块并调用main函数
+    today = get_today_date()
+    
+    # 尝试导入下载模块
     try:
         from download_arxiv_papers import main as download_main
         import sys
-        
-        # 模拟命令行参数: 下载今天的论文
-        sys.argv = ['download_arxiv_papers.py', 'today', '-c', ARXIV_SUBJECT]
-        download_main()
     except ImportError:
         print("Error: download_arxiv_papers.py not found")
         sys.exit(1)
+    
+    # 逐个下载每个主题
+    for subject in ARXIV_SUBJECTS:
+        print(f"\n>>> 下载主题: {subject}")
+        print("-" * 40)
+        
+        try:
+            sys.argv = ['download_arxiv_papers.py', today, '-c', subject]
+            download_main()
+        except SystemExit:
+            pass  # 忽略下载脚本的退出
+        except Exception as e:
+            print(f"Error downloading {subject}: {e}")
+        
+        import time
+        time.sleep(1)  # 避免请求过快
 
 
 def run_search():
-    """检索PDF"""
-    print("\n" + "=" * 50)
+    """检索所有主题的PDF"""
+    print("\n" + "=" * 60)
     print("Step 2: 检索代码/数据公开声明")
-    print("=" * 50)
+    print("=" * 60)
     
-    pdf_folder = get_latest_folder()
+    # 获取所有主题的文件夹
+    subject_folders = get_latest_date_folders()
     
-    if not pdf_folder or not os.path.exists(pdf_folder):
-        print(f"Error: 文件夹不存在: {pdf_folder}")
+    if not subject_folders:
+        print("Error: 未找到任何论文文件夹")
         print("请先运行下载: uv run python main.py --download-only")
         sys.exit(1)
     
-    # 获取所有PDF
-    pdf_files = [f for f in os.listdir(pdf_folder) if f.endswith('.pdf')]
-    print(f"找到 {len(pdf_files)} 个PDF文件\n")
+    print(f"找到以下文件夹:")
+    for subject, folder in subject_folders:
+        print(f"  - {subject}: {folder}")
+    print()
     
-    results = {'scanned': len(pdf_files), 'found': []}
+    all_results = []
     
-    for i, pdf_file in enumerate(pdf_files, 1):
-        arxiv_id = pdf_file.replace('.pdf', '')
-        print(f"[{i}/{len(pdf_files)}] 处理 {arxiv_id}...", end=" ")
+    # 逐个主题检索
+    for subject, folder in subject_folders:
+        print(f"--- 处理主题: {subject} ---")
         
-        result = search_pdf(os.path.join(pdf_folder, pdf_file))
+        pdf_files = [f for f in os.listdir(folder) if f.endswith('.pdf')]
+        print(f"找到 {len(pdf_files)} 个PDF文件")
         
-        if result:
-            result['arxiv_id'] = arxiv_id
-            results['found'].append(result)
-            print(f"✓ 发现 {len(result['findings'])} 处")
-        else:
-            print("✗")
+        results = {'subject': subject, 'scanned': len(pdf_files), 'found': []}
+        
+        for i, pdf_file in enumerate(pdf_files, 1):
+            arxiv_id = pdf_file.replace('.pdf', '')
+            print(f"  [{i}/{len(pdf_files)}] {arxiv_id}...", end=" ")
+            
+            result = search_pdf(os.path.join(folder, pdf_file), arxiv_id, subject)
+            
+            if result:
+                results['found'].append(result)
+                print(f"✓ {len(result['findings'])} 处")
+            else:
+                print("✗")
+        
+        all_results.append(results)
+        print()
     
-    # 生成报告
-    today = datetime.now().strftime('%Y-%m-%d')
-    report_path = f"code_declaration_report_{today}.md"
-    generate_report(results, report_path)
+    # 生成统一报告
+    today = get_today_date()
+    report_dir = REPORT_ROOT
+    report_path = f"{report_dir}/code_declaration_report_{today}.md"
     
-    print("\n" + "=" * 50)
-    print(f"完成! 发现 {len(results['found'])} 篇包含声明")
-    print(f"报告: {report_path}")
-    print("=" * 50)
+    generate_unified_report(all_results, report_path)
+    
+    # 汇总统计
+    total_scanned = sum(r['scanned'] for r in all_results)
+    total_found = sum(len(r['found']) for r in all_results)
+    
+    print("=" * 60)
+    print("完成!")
+    print(f"  扫描: {total_scanned} 篇")
+    print(f"  发现: {total_found} 篇包含声明")
+    print(f"  报告: {report_path}")
+    print("=" * 60)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='ArXiv论文下载与检索工具')
+    parser = argparse.ArgumentParser(description='ArXiv多主题论文下载与检索工具')
     parser.add_argument('--download-only', action='store_true', help='仅下载论文')
     parser.add_argument('--search-only', action='store_true', help='仅检索已有PDF')
     
