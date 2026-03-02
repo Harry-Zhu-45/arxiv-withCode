@@ -208,11 +208,12 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # 构建输出子目录
-    date_dir = output_dir / f"arxiv_{args.category}_{target_date}"
-    date_dir.mkdir(parents=True, exist_ok=True)
+    # 构建输出子目录: arxiv_papers/YYYY-MM-DD/{subject}
+    date_dir = output_dir / target_date
+    subject_dir = date_dir / args.category
+    subject_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"存储目录: {date_dir}")
+    print(f"存储目录: {subject_dir}")
     print("-" * 50)
     
     # 获取论文列表
@@ -276,7 +277,7 @@ def main():
     print("开始下载PDF...")
     
     for i, paper in enumerate(all_papers, 1):
-        output_file = date_dir / f"{paper.arxiv_id}.pdf"
+        output_file = subject_dir / f"{paper.arxiv_id}.pdf"
         
         # 截断标题显示
         title_short = paper.title[:50] + "..." if len(paper.title) > 50 else paper.title
@@ -301,7 +302,7 @@ def main():
     print(f"下载完成!")
     print(f"  成功: {success_count}")
     print(f"  失败: {fail_count}")
-    print(f"  存储位置: {date_dir}")
+    print(f"  存储位置: {subject_dir}")
 
 
 if __name__ == "__main__":

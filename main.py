@@ -65,7 +65,7 @@ def get_today_date():
 
 def get_subject_folder(subject, date):
     """获取某个主题的文件夹路径"""
-    return f"{OUTPUT_ROOT}/arxiv_{subject}_{date}"
+    return f"{OUTPUT_ROOT}/{date}/{subject}"
 
 
 def get_all_subject_folders(date):
@@ -81,39 +81,35 @@ def get_all_subject_folders(date):
 def get_latest_date_folders():
     """自动获取最新日期的所有主题文件夹"""
     # 查找最新的日期
-    pattern = f"{OUTPUT_ROOT}/arxiv_*_????-??-??"
-    all_folders = glob.glob(pattern)
+    pattern = f"{OUTPUT_ROOT}/????-??-??"
+    all_date_folders = glob.glob(pattern)
     
     # 兼容Windows路径
-    all_folders = [f.replace('\\', '/') for f in all_folders]
+    all_date_folders = [f.replace('\\', '/') for f in all_date_folders]
     
-    if not all_folders:
+    if not all_date_folders:
         return []
     
     # 提取日期并排序
     date_folders = {}
-    for folder in all_folders:
-        # 提取日期 (arxiv_quant-ph_2026-03-02 -> 2026-03-02)
-        parts = folder.split('_')
-        if len(parts) >= 3:
-            date = parts[-1]
-            if date not in date_folders:
-                date_folders[date] = []
-            date_folders[date].append(folder)
-    
+    for folder in all_date_folders:
+        date = os.path.basename(folder)
+        if date:
+            date_folders[date] = folder
+
     if not date_folders:
         return []
-    
-    # 返回最新日期的文件夹
+
+    # 返回最新日期的所有主题文件夹
     latest_date = max(date_folders.keys())
+    latest_date_folder = date_folders[latest_date]
     result = []
-    for f in date_folders[latest_date]:
-        # 提取subject (e.g., arxiv_cond-mat_2026-03-02 -> cond-mat)
-        # 格式: .../arxiv_papers/arxiv_{subject}_{date}
-        folder_name = os.path.basename(f)  # 获取最后一部分，如 arxiv_cond-mat_2026-03-02
-        # 去掉arxiv_前缀和日期后缀
-        subject = folder_name.replace('arxiv_', '').rsplit('_', 1)[0]
-        result.append((subject, f))
+    subject_folders = glob.glob(f"{latest_date_folder}/*")
+    subject_folders = [f.replace('\\', '/') for f in subject_folders]
+    for f in subject_folders:
+        if os.path.isdir(f):
+            subject = os.path.basename(f)
+            result.append((subject, f))
     return result
 
 
