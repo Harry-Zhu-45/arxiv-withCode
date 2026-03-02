@@ -8,6 +8,7 @@ wheels/
 .minimax
 arxiv_papers
 reports
+.github
 
 # Virtual environments
 .venv

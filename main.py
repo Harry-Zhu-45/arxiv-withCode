@@ -11,9 +11,15 @@ Usage:
 """
 
 import argparse
-import os
-import sys
 import glob
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 # 导入功能模块
@@ -41,9 +47,9 @@ SUBJECT_DISPLAY_NAMES = {
 
 KEYWORDS = [
     "github", "gitlab", "bitbucket", "repository",
-    "zenodo", "figshare", "dataverse", "osf",
+    "zenodo", "figshare", "dataverse",
     "code available", "data available", "source code",
-    "open source", "publicly available", "available at"
+    "open source", "available at"
 ]
 
 # 输出目录配置
@@ -133,7 +139,102 @@ def extract_title_abstract(text):
     return title, abstract
 
 
-def search_pdf(pdf_path, arxiv_id, subject):
+def fetch_url(url, timeout=30, max_retries=3):
+    """获取URL内容（文本）"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
+
+    for attempt in range(max_retries):
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
+                return response.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            print(f"HTTP Error {e.code}: {e.reason}", file=sys.stderr)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+
+        if attempt < max_retries - 1:
+            time.sleep(2 ** attempt)
+
+    return None
+
+
+def fetch_arxiv_metadata(arxiv_ids):
+    """通过arXiv官方API获取标题和摘要"""
+    if not arxiv_ids:
+        return {}
+
+    base_url = "http://export.arxiv.org/api/query?id_list="
+    batch_size = 50
+    metadata = {}
+
+    for i in range(0, len(arxiv_ids), batch_size):
+        batch = arxiv_ids[i:i + batch_size]
+        url = base_url + ",".join(batch)
+        xml_text = fetch_url(url, timeout=40)
+        if not xml_text:
+            continue
+
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError as e:
+            print(f"API parse error: {e}", file=sys.stderr)
+            continue
+
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall("atom:entry", ns):
+            id_node = entry.find("atom:id", ns)
+            title_node = entry.find("atom:title", ns)
+            summary_node = entry.find("atom:summary", ns)
+
+            if id_node is None or not id_node.text:
+                continue
+
+            abs_url = id_node.text.strip()
+            arxiv_id = abs_url.rsplit("/", 1)[-1].split("v", 1)[0]
+
+            title = title_node.text.strip() if title_node is not None and title_node.text else ""
+            summary = summary_node.text.strip() if summary_node is not None and summary_node.text else ""
+
+            title = " ".join(title.split())
+            summary = " ".join(summary.split())
+
+            metadata[arxiv_id] = {"title": title, "abstract": summary}
+
+        time.sleep(0.5)
+
+    return metadata
+
+
+def load_metadata_cache(cache_path):
+    """读取本地元数据缓存"""
+    if not os.path.exists(cache_path):
+        return {}
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_metadata_cache(cache_path, metadata):
+    """保存元数据缓存到本地"""
+    try:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=True, indent=2)
+    except Exception as e:
+        print(f"Warning: failed to save metadata cache: {e}")
+
+
+def search_pdf(pdf_path, arxiv_id, subject, metadata_lookup=None):
     """检索单个PDF"""
     import re
     
@@ -146,6 +247,12 @@ def search_pdf(pdf_path, arxiv_id, subject):
         doc.close()
         
         title, abstract = extract_title_abstract(full_text)
+        if metadata_lookup:
+            meta = metadata_lookup.get(arxiv_id, {})
+            if meta.get("title"):
+                title = meta.get("title")
+            if meta.get("abstract"):
+                abstract = meta.get("abstract")
         text_lower = full_text.lower()
         
         # 构建arXiv摘要链接
@@ -309,6 +416,19 @@ def run_search():
         
         pdf_files = [f for f in os.listdir(folder) if f.endswith('.pdf')]
         print(f"找到 {len(pdf_files)} 个PDF文件")
+
+        arxiv_ids = [f.replace('.pdf', '') for f in pdf_files]
+        cache_path = os.path.join(folder, "metadata.json")
+        metadata_lookup = load_metadata_cache(cache_path)
+        missing_ids = [i for i in arxiv_ids if i not in metadata_lookup]
+        if missing_ids:
+            print(f"  获取元数据: {len(missing_ids)} 篇")
+            fetched = fetch_arxiv_metadata(missing_ids)
+            if fetched:
+                metadata_lookup.update(fetched)
+                save_metadata_cache(cache_path, metadata_lookup)
+        else:
+            print("  元数据已缓存")
         
         results = {'subject': subject, 'scanned': len(pdf_files), 'found': []}
         
@@ -316,7 +436,7 @@ def run_search():
             arxiv_id = pdf_file.replace('.pdf', '')
             print(f"  [{i}/{len(pdf_files)}] {arxiv_id}...", end=" ")
             
-            result = search_pdf(os.path.join(folder, pdf_file), arxiv_id, subject)
+            result = search_pdf(os.path.join(folder, pdf_file), arxiv_id, subject, metadata_lookup)
             
             if result:
                 results['found'].append(result)
