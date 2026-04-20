@@ -14,10 +14,12 @@ import argparse
 import glob
 import json
 import os
+import re
 import ssl
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -127,6 +129,46 @@ def get_latest_date_folders():
     return result
 
 
+def normalize_whitespace(text):
+    """Normalize repeated whitespace inside metadata fields."""
+    if not text:
+        return ""
+    return " ".join(str(text).split())
+
+
+def normalize_arxiv_id(value):
+    """Normalize an arXiv identifier to the bare xxxx.xxxxx form."""
+    if not value:
+        return ""
+
+    normalized = normalize_whitespace(value)
+    normalized = normalized.rsplit("/", 1)[-1]
+    if normalized.endswith(".pdf"):
+        normalized = normalized[:-4]
+    if "?" in normalized:
+        normalized = normalized.split("?", 1)[0]
+
+    version_match = re.match(r"^(.+?)v\d+$", normalized)
+    if version_match:
+        normalized = version_match.group(1)
+
+    return normalized
+
+
+def is_metadata_complete(metadata):
+    """Return True when cached metadata is good enough for report output."""
+    if not isinstance(metadata, dict):
+        return False
+
+    authors = metadata.get("authors", [])
+    if isinstance(authors, str):
+        authors = [authors]
+
+    return bool(normalize_whitespace(metadata.get("title"))) and bool(
+        normalize_whitespace(metadata.get("abstract"))
+    ) and any(normalize_whitespace(author) for author in authors)
+
+
 def extract_title_abstract(text):
     """提取标题和摘要"""
     import re
@@ -182,13 +224,22 @@ def fetch_arxiv_metadata(arxiv_ids):
     if not arxiv_ids:
         return {}
 
-    base_url = "http://export.arxiv.org/api/query?id_list="
+    base_url = "https://export.arxiv.org/api/query?"
     batch_size = 50
     metadata = {}
 
     for i in range(0, len(arxiv_ids), batch_size):
-        batch = arxiv_ids[i:i + batch_size]
-        url = base_url + ",".join(batch)
+        batch = [normalize_arxiv_id(arxiv_id) for arxiv_id in arxiv_ids[i:i + batch_size]]
+        batch = [arxiv_id for arxiv_id in batch if arxiv_id]
+        if not batch:
+            continue
+
+        query = urllib.parse.urlencode({
+            "id_list": ",".join(batch),
+            "start": 0,
+            "max_results": len(batch),
+        })
+        url = base_url + query
         xml_text = fetch_url(url, timeout=40)
         if not xml_text:
             continue
@@ -200,6 +251,7 @@ def fetch_arxiv_metadata(arxiv_ids):
             continue
 
         ns = {"atom": "http://www.w3.org/2005/Atom"}
+        batch_metadata = {}
         for entry in root.findall("atom:entry", ns):
             id_node = entry.find("atom:id", ns)
             title_node = entry.find("atom:title", ns)
@@ -209,15 +261,33 @@ def fetch_arxiv_metadata(arxiv_ids):
                 continue
 
             abs_url = id_node.text.strip()
-            arxiv_id = abs_url.rsplit("/", 1)[-1].split("v", 1)[0]
+            arxiv_id = normalize_arxiv_id(abs_url)
 
             title = title_node.text.strip() if title_node is not None and title_node.text else ""
             summary = summary_node.text.strip() if summary_node is not None and summary_node.text else ""
+            authors = []
+            for author_node in entry.findall("atom:author/atom:name", ns):
+                if author_node.text:
+                    author_name = normalize_whitespace(author_node.text)
+                    if author_name:
+                        authors.append(author_name)
 
-            title = " ".join(title.split())
-            summary = " ".join(summary.split())
+            title = normalize_whitespace(title)
+            summary = normalize_whitespace(summary)
 
-            metadata[arxiv_id] = {"title": title, "abstract": summary}
+            batch_metadata[arxiv_id] = {
+                "title": title,
+                "abstract": summary,
+                "authors": authors,
+            }
+
+        metadata.update(batch_metadata)
+        missing_in_batch = [arxiv_id for arxiv_id in batch if arxiv_id not in batch_metadata]
+        if missing_in_batch:
+            print(
+                f"Warning: metadata missing for {len(missing_in_batch)} IDs in API batch",
+                file=sys.stderr,
+            )
 
         time.sleep(0.5)
 
@@ -230,9 +300,36 @@ def load_metadata_cache(cache_path):
         return {}
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw_cache = json.load(f)
     except Exception:
         return {}
+
+    if not isinstance(raw_cache, dict):
+        return {}
+
+    normalized_cache = {}
+    for arxiv_id, metadata in raw_cache.items():
+        normalized_id = normalize_arxiv_id(arxiv_id)
+        if not normalized_id or not isinstance(metadata, dict):
+            continue
+
+        authors = metadata.get("authors", [])
+        if isinstance(authors, str):
+            authors = [authors]
+        elif not isinstance(authors, list):
+            authors = []
+
+        normalized_cache[normalized_id] = {
+            "title": normalize_whitespace(metadata.get("title")),
+            "abstract": normalize_whitespace(metadata.get("abstract")),
+            "authors": [
+                author_name
+                for author in authors
+                if (author_name := normalize_whitespace(author))
+            ],
+        }
+
+    return normalized_cache
 
 
 def save_metadata_cache(cache_path, metadata):
@@ -255,14 +352,12 @@ def search_pdf(pdf_path, arxiv_id, subject, metadata_lookup=None):
         doc = fitz.open(pdf_path)
         full_text = "\n".join(page.get_text() for page in doc)
         doc.close()
-        
-        title, abstract = extract_title_abstract(full_text)
-        if metadata_lookup:
-            meta = metadata_lookup.get(arxiv_id, {})
-            if meta.get("title"):
-                title = meta.get("title")
-            if meta.get("abstract"):
-                abstract = meta.get("abstract")
+
+        meta = metadata_lookup.get(normalize_arxiv_id(arxiv_id), {}) if metadata_lookup else {}
+        fallback_title, fallback_abstract = extract_title_abstract(full_text)
+        title = meta.get("title") or fallback_title or arxiv_id
+        abstract = meta.get("abstract") or fallback_abstract
+        authors = meta.get("authors", [])
         text_lower = full_text.lower()
         
         # 构建arXiv摘要链接
@@ -287,6 +382,7 @@ def search_pdf(pdf_path, arxiv_id, subject, metadata_lookup=None):
         return {
             'title': title, 
             'abstract': abstract, 
+            'authors': authors,
             'findings': found,
             'arxiv_id': arxiv_id,
             'abs_url': abs_url,
@@ -345,12 +441,18 @@ def generate_unified_report(all_results, output_path):
         md += f"## Results ({len(all_found)} papers)\n\n"
         
         for i, p in enumerate(all_found, 1):
+            authors_line = (
+                f"**Authors**: {', '.join(p['authors'])}\n\n"
+                if p.get('authors')
+                else ""
+            )
+            abstract_text = p['abstract'] if p['abstract'] else "_Abstract unavailable._"
             md += f"""### {i}. [{p['arxiv_id']}]({p['abs_url']})
 
 **Subject**: {p['subject_display']}  
 **Title**: {p['title']}
 
-**Abstract**: {p['abstract'][:300]}{'...' if len(p['abstract']) > 300 else ''}
+{authors_line}**Abstract**: {abstract_text}
 
 **Declarations Found**:
 
@@ -435,15 +537,18 @@ def run_search():
         arxiv_ids = [f.replace('.pdf', '') for f in pdf_files]
         cache_path = os.path.join(folder, "metadata.json")
         metadata_lookup = load_metadata_cache(cache_path)
-        missing_ids = [i for i in arxiv_ids if i not in metadata_lookup]
-        if missing_ids:
-            print(f"  获取元数据: {len(missing_ids)} 篇")
-            fetched = fetch_arxiv_metadata(missing_ids)
+        refresh_ids = [
+            arxiv_id for arxiv_id in arxiv_ids
+            if not is_metadata_complete(metadata_lookup.get(normalize_arxiv_id(arxiv_id)))
+        ]
+        if refresh_ids:
+            print(f"  Refreshing metadata for {len(refresh_ids)} papers")
+            fetched = fetch_arxiv_metadata(refresh_ids)
             if fetched:
                 metadata_lookup.update(fetched)
                 save_metadata_cache(cache_path, metadata_lookup)
         else:
-            print("  元数据已缓存")
+            print("  Metadata cache is complete")
         
         results = {'subject': subject, 'scanned': len(pdf_files), 'found': []}
         
@@ -455,9 +560,9 @@ def run_search():
             
             if result:
                 results['found'].append(result)
-                print(f"✓ {len(result['findings'])} 处")
+                print(f"FOUND {len(result['findings'])} matches")
             else:
-                print("✗")
+                print("NONE")
         
         all_results.append(results)
         print()
