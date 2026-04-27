@@ -2,7 +2,7 @@
 """
 ArXiv多主题论文下载与代码声明检索工具
 
-支持 subjects: quant-ph, physics.optics, cond-mat
+支持 subjects: quant-ph, physics.optics, cond-mat, physics.flu-dyn
 
 Usage:
     uv run python main.py                    # 下载当天所有主题论文并检索
@@ -37,14 +37,16 @@ except ImportError:
 ARXIV_SUBJECTS = [
     "quant-ph",
     "physics.optics", 
-    "cond-mat"
+    "cond-mat",
+    "physics.flu-dyn",
 ]
 
 # 主题显示名称映射
 SUBJECT_DISPLAY_NAMES = {
     "quant-ph": "Quantum Physics",
     "physics.optics": "Optics",
-    "cond-mat": "Condensed Matter"
+    "cond-mat": "Condensed Matter",
+    "physics.flu-dyn": "Fluid Dynamics",
 }
 
 KEYWORDS = [
